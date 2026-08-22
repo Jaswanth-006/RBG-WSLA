@@ -18,8 +18,8 @@ from docling.datamodel.pipeline_options import (
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
 
-from wsla_service.config import settings
-from wsla_service.models import (
+from config import settings
+from models import (
     DocumentMetadata,
     ImageMetadata,
     ParagraphMetadata,

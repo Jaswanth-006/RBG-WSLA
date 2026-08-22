@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 
-from wsla_service.config import settings
-from wsla_service.models import PageClassification, PdfType
+from config import settings
+from models import PageClassification, PdfType
 
 _log = logging.getLogger(__name__)
 

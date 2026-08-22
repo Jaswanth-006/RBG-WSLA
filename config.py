@@ -4,15 +4,18 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings
 
+# Resolve the wsla_service package directory so data directories live inside it
+_PACKAGE_DIR = Path(__file__).resolve().parent
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Directory where uploaded PDFs are stored, keyed by doc_id
-    upload_dir: Path = Path("wsla_uploads")
+    upload_dir: Path = _PACKAGE_DIR / "uploads"
 
     # Directory where parsed outputs (markdown, images) are stored
-    output_dir: Path = Path("wsla_output")
+    output_dir: Path = _PACKAGE_DIR / "output"
 
     # Maximum file size in bytes (default 100 MB)
     max_file_size: int = 100 * 1024 * 1024
@@ -28,3 +31,4 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
