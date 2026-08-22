@@ -33,7 +33,10 @@ RUN mkdir -p /app/wsla_uploads /app/wsla_output
 # Environment variables for the service
 ENV WSLA_UPLOAD_DIR=/app/wsla_uploads
 ENV WSLA_OUTPUT_DIR=/app/wsla_output
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app/wsla_service
+
+# Run from the directory that contains app.py
+WORKDIR /app/wsla_service
 
 EXPOSE 8000
 
