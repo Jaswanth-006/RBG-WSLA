@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  wsla-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wsla-document-parser
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist uploads and output across container restarts
+      - wsla_uploads:/app/wsla_uploads
+      - wsla_output:/app/wsla_output
+    environment:
+      - WSLA_UPLOAD_DIR=/app/wsla_uploads
+      - WSLA_OUTPUT_DIR=/app/wsla_output
+      - OMP_NUM_THREADS=4
+    restart: unless-stopped
+
+volumes:
+  wsla_uploads:
+  wsla_output:
