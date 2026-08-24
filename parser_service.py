@@ -32,7 +32,10 @@ _log = logging.getLogger(__name__)
 
 def _build_converter() -> DocumentConverter:
     """Create a DocumentConverter configured for full PDF parsing with OCR."""
-    pipeline_options = PdfPipelineOptions()
+    # pipeline_options = PdfPipelineOptions()
+    pipeline_options = PdfPipelineOptions(
+    artifacts_path="/opt/docling/models"
+)
     pipeline_options.images_scale = settings.image_resolution_scale
     pipeline_options.generate_page_images = False
     pipeline_options.generate_picture_images = True
