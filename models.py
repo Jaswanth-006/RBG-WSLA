@@ -21,6 +21,31 @@ class PageClassification(BaseModel):
     classification: PdfType
 
 
+class ProcessingMetrics(BaseModel):
+    """Runtime and throughput metrics for a document parse."""
+
+    requested_device: str = ""
+    resolved_device: str = ""
+    gpu_available: bool = False
+    gpu_name: str | None = None
+    cuda_version: str | None = None
+    gpu_count: int = 0
+
+    upload_seconds: float = 0.0
+    detection_seconds: float = 0.0
+    parsing_seconds: float = 0.0
+    metadata_seconds: float = 0.0
+    zip_seconds: float = 0.0
+    total_seconds: float = 0.0
+
+    page_count: int = 0
+
+    parsing_pages_per_second: float = 0.0
+    parsing_pages_per_minute: float = 0.0
+    overall_pages_per_second: float = 0.0
+    overall_pages_per_minute: float = 0.0
+
+
 class UploadResponse(BaseModel):
     """Response returned after uploading a PDF."""
 

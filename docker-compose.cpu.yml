@@ -1,24 +1,23 @@
+# docker-compose.cpu.yml
+# CPU-only deployment configuration for systems without GPU support
+
 services:
   wsla-api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: wsla-document-parser
-    runtime: nvidia
+    container_name: wsla-document-parser-cpu
     ports:
       - "8000:8000"
     volumes:
-      # Persist uploads and output across container restarts
       - wsla_uploads:/app/wsla_uploads
       - wsla_output:/app/wsla_output
     environment:
       - WSLA_UPLOAD_DIR=/app/wsla_uploads
       - WSLA_OUTPUT_DIR=/app/wsla_output
-      - WSLA_DEVICE=auto
+      - WSLA_DEVICE=cpu
       - DOCLING_ARTIFACTS_PATH=/opt/docling/models
       - OMP_NUM_THREADS=4
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     restart: unless-stopped
 
 volumes:

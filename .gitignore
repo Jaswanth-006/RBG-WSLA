@@ -1,4 +1,40 @@
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Runtime data directories
 output/
 uploads/
+
+# Environment
+.env
+.env.local
+
+# Archives
 *.zip
+*.tar
+*.tar.gz
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Test artifacts
+tests/
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Model cache (local development)
+UsersASUS.cachedoclingmodels/
+
+# Logs
+*.log
+logs/
+
+# OS
+Thumbs.db

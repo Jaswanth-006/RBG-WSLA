@@ -1,14 +1,29 @@
 # WSLA Document Parsing API — Dependencies
 #
-# These are the additional dependencies on top of the docling package.
-# Docling itself (with OCR + PDF support) must be installed separately:
-#   pip install "docling[standard]"
+# FastAPI application dependencies for the Docling-based PDF parsing service.
+# Docling itself is installed in the Dockerfile with specific extras.
 
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-python-multipart>=0.0.9
-pydantic-settings>=2.3.0
-pandas>=2.1.4
-tabulate>=0.9.0
-# onnxruntime>=1.7.0
-# feat-ocr-rapidocr-onnx
+# Web Framework
+fastapi>=0.115.0,<0.116.0
+uvicorn[standard]>=0.34.0,<0.35.0
+python-multipart>=0.0.9,<0.1.0
+
+# Configuration
+pydantic>=2.10.0,<3.0.0
+pydantic-settings>=2.14.0,<3.0.0
+
+# Data Processing
+pandas>=2.2.0,<3.0.0
+tabulate>=0.10.0,<0.11.0
+
+# PDF Processing (pypdfium2 is included with docling but listed for clarity)
+pypdfium2>=5.12.0,<6.0.0
+
+# PyTorch (CPU version - GPU version installed via extra-index-url in Dockerfile)
+# torch>=2.0.0,<3.0.0
+
+# Note: The following are installed via docling extras in the Dockerfile:
+# - docling-slim[format-pdf,convert-core,models-local,feat-ocr-rapidocr-onnx,cli]
+# - scipy (for docling's scientific computing)
+# - numpy (via docling dependencies)
+# - pillow (via docling dependencies)
