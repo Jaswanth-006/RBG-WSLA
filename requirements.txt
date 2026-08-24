@@ -4,11 +4,16 @@
 # Docling itself (with OCR + PDF support) must be installed separately:
 #   pip install "docling[standard]"
 
+# Core API dependencies
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 pydantic-settings>=2.3.0
 pandas>=2.1.4
 tabulate>=0.9.0
-# onnxruntime>=1.7.0
-# feat-ocr-rapidocr-onnx
+
+# CPU-only PyTorch (required by docling for CPU inference)
+# Install CPU version to avoid CUDA dependencies and reduce image size
+# --index-url https://download.pytorch.org/whl/cpu
+# torch>=2.0.0
+# torchvision>=0.15.0

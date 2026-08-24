@@ -9,22 +9,26 @@ Endpoints:
 
 import json
 import logging
-import shutil
+import time
 import uuid
 import zipfile
 from io import BytesIO
-from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from config import settings
 from models import (
     ParseResponse,
+    ProcessingMetrics,
     StatusResponse,
     UploadResponse,
 )
-from parser_service import parse_pdf
+from parser_service import (
+    calculate_throughput,
+    get_runtime_summary,
+    parse_pdf,
+)
 from pdf_detector import detect_pdf_type
 
 logging.basicConfig(
@@ -44,6 +48,87 @@ app = FastAPI(
 )
 
 
+def _print_runtime_summary() -> None:
+    """Print a clean startup summary for CPU execution."""
+    runtime = get_runtime_summary()
+    print("=" * 60)
+    print("WSLA Document Parsing API")
+    print("=" * 60)
+    print(f"Device           : {runtime['resolved_device']}")
+    print("=" * 60)
+
+
+def _build_performance_payload(metrics: ProcessingMetrics, filename: str) -> dict:
+    return {
+        "document": filename,
+        "page_count": metrics.page_count,
+        "device": metrics.resolved_device,
+        "timing_seconds": {
+            "upload": round(metrics.upload_seconds, 6),
+            "detection": round(metrics.detection_seconds, 6),
+            "parsing": round(metrics.parsing_seconds, 6),
+            "metadata": round(metrics.metadata_seconds, 6),
+            "zip": round(metrics.zip_seconds, 6),
+            "total": round(metrics.total_seconds, 6),
+        },
+        "throughput": {
+            "parsing_pages_per_second": round(metrics.parsing_pages_per_second, 6),
+            "parsing_pages_per_minute": round(metrics.parsing_pages_per_minute, 6),
+            "overall_pages_per_second": round(metrics.overall_pages_per_second, 6),
+            "overall_pages_per_minute": round(metrics.overall_pages_per_minute, 6),
+        },
+    }
+
+
+def _print_processing_summary(
+    filename: str,
+    page_count: int,
+    pdf_type: str,
+    metrics: ProcessingMetrics,
+) -> None:
+    """Print a terminal-friendly PDF processing summary."""
+    total = metrics.total_seconds if metrics.total_seconds > 0 else 1.0
+    stage_rows = [
+        ("Upload / Save", metrics.upload_seconds),
+        ("PDF Detection", metrics.detection_seconds),
+        ("Docling Parsing", metrics.parsing_seconds),
+        ("Metadata Extraction", metrics.metadata_seconds),
+        ("ZIP Creation", metrics.zip_seconds),
+    ]
+
+    print("=" * 80)
+    print("WSLA PDF PROCESSING PERFORMANCE")
+    print("=" * 80)
+    print(f"Document              : {filename}")
+    print(f"Pages                 : {page_count}")
+    print(f"PDF Type              : {pdf_type}")
+    print(f"Device                : {metrics.resolved_device}")
+    print("-" * 80)
+    print(f"{'Stage':<30} {'Time (sec)':>15} {'% Total':>12}")
+    print("-" * 80)
+    for label, value in stage_rows:
+        pct = (value / total) * 100 if total > 0 else 0.0
+        print(f"{label:<30} {value:>15.2f} {pct:>11.1f}%")
+    print("-" * 80)
+    print(f"{'Total':<30} {metrics.total_seconds:>15.2f} {100.0:>11.1f}%")
+    print("-" * 80)
+    print(f"Docling throughput     : {metrics.parsing_pages_per_second:.2f} pages/sec")
+    print(f"Docling throughput     : {metrics.parsing_pages_per_minute:.2f} pages/min")
+    print(f"Overall throughput     : {metrics.overall_pages_per_second:.2f} pages/sec")
+    print(f"Overall throughput     : {metrics.overall_pages_per_minute:.2f} pages/min")
+    print("=" * 80)
+    _log.info(
+        "[PERF] doc=%s pages=%s device=%s parse=%.2fs total=%.2fs pps=%.2f ppm=%.2f",
+        filename,
+        page_count,
+        metrics.resolved_device,
+        metrics.parsing_seconds,
+        metrics.total_seconds,
+        metrics.parsing_pages_per_second,
+        metrics.parsing_pages_per_minute,
+    )
+
+
 @app.on_event("startup")
 def _ensure_directories() -> None:
     """Create upload and output directories on startup."""
@@ -51,6 +136,7 @@ def _ensure_directories() -> None:
     settings.output_dir.mkdir(parents=True, exist_ok=True)
     _log.info("Upload dir: %s", settings.upload_dir.resolve())
     _log.info("Output dir: %s", settings.output_dir.resolve())
+    _print_runtime_summary()
 
 
 # ─── Upload endpoint ─────────────────────────────────────────────────────────
@@ -113,6 +199,7 @@ def parse_document(doc_id: str) -> ParseResponse:
     3. Parses the PDF through Docling's pipeline (with OCR for scanned pages).
     4. Returns structured JSON with Markdown text and metadata.
     """
+    request_start = time.perf_counter()
     doc_dir = settings.upload_dir / doc_id
     if not doc_dir.exists():
         raise HTTPException(status_code=404, detail=f"Document {doc_id} not found.")
@@ -129,14 +216,48 @@ def parse_document(doc_id: str) -> ParseResponse:
 
     # ── Step 1: Detect PDF type ──────────────────────────────────────────
     _log.info("Detecting PDF type for %s (doc_id=%s)", filename, doc_id)
+    detect_start = time.perf_counter()
     pdf_type, page_classifications = detect_pdf_type(pdf_path)
+    detection_seconds = time.perf_counter() - detect_start
 
     # ── Step 2: Parse via Docling ────────────────────────────────────────
     output_dir = settings.output_dir / doc_id
     _log.info("Parsing %s (type=%s) via Docling", filename, pdf_type.value)
-    markdown_file, markdown_text, metadata = parse_pdf(pdf_path, output_dir)
+    parse_start = time.perf_counter()
+    markdown_file, markdown_text, metadata, parse_timing = parse_pdf(
+        pdf_path,
+        output_dir,
+        include_timing=True,
+    )
+    parsing_seconds = time.perf_counter() - parse_start
+    total_seconds = time.perf_counter() - request_start
 
     page_count = len(page_classifications)
+
+    runtime = get_runtime_summary()
+    metrics = ProcessingMetrics(
+        requested_device=runtime["requested_device"],
+        resolved_device=runtime["resolved_device"],
+        gpu_available=bool(runtime["gpu_available"]),
+        gpu_name=runtime["gpu_name"],
+        cuda_version=runtime["cuda_version"],
+        gpu_count=int(runtime["gpu_count"]),
+        upload_seconds=0.0,
+        detection_seconds=detection_seconds,
+        parsing_seconds=parsing_seconds,
+        metadata_seconds=parse_timing.get("metadata_seconds", 0.0),
+        zip_seconds=0.0,
+        total_seconds=total_seconds,
+        page_count=page_count,
+    )
+    metrics.parsing_pages_per_second, metrics.parsing_pages_per_minute = calculate_throughput(
+        page_count,
+        metrics.parsing_seconds,
+    )
+    metrics.overall_pages_per_second, metrics.overall_pages_per_minute = calculate_throughput(
+        page_count,
+        metrics.total_seconds,
+    )
 
     _log.info("Parse complete for %s: %d pages, type=%s", filename, page_count, pdf_type.value)
 
@@ -170,11 +291,15 @@ async def process_pdf(file: UploadFile = File(...)) -> StreamingResponse:
         {pdf_stem}/
         ├── {pdf_stem}.md          — Full parsed markdown
         ├── metadata.json          — Structured metadata (tables, images, paragraphs, sections)
+        ├── performance.json       — Performance metrics and timing
         └── images/
             ├── {pdf_stem}-picture-0.png
             ├── {pdf_stem}-picture-1.png
             └── ...
     """
+    request_start = time.perf_counter()
+    runtime = get_runtime_summary()
+
     # ── Validate upload ──────────────────────────────────────────────────
     if file.filename is None or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
@@ -198,12 +323,14 @@ async def process_pdf(file: UploadFile = File(...)) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     # ── Save the PDF ─────────────────────────────────────────────────────
+    upload_start = time.perf_counter()
     doc_id = str(uuid.uuid4())
     doc_dir = settings.upload_dir / doc_id
     doc_dir.mkdir(parents=True, exist_ok=True)
 
     pdf_path = doc_dir / file.filename
     pdf_path.write_bytes(content)
+    upload_seconds = time.perf_counter() - upload_start
     pdf_stem = pdf_path.stem
 
     _log.info(
@@ -213,20 +340,50 @@ async def process_pdf(file: UploadFile = File(...)) -> StreamingResponse:
 
     # ── Step 1: Detect PDF type ──────────────────────────────────────────
     _log.info("[process] Detecting PDF type for %s", file.filename)
+    detect_start = time.perf_counter()
     pdf_type, page_classifications = detect_pdf_type(pdf_path)
+    detection_seconds = time.perf_counter() - detect_start
 
     # ── Step 2: Parse via Docling ────────────────────────────────────────
     output_dir = settings.output_dir / doc_id
     _log.info("[process] Parsing %s (type=%s) via Docling", file.filename, pdf_type.value)
-    markdown_file, markdown_text, metadata = parse_pdf(pdf_path, output_dir)
-
+    parse_start = time.perf_counter()
+    markdown_file, markdown_text, metadata, parse_timing = parse_pdf(
+        pdf_path,
+        output_dir,
+        include_timing=True,
+    )
+    parsing_seconds = time.perf_counter() - parse_start
     page_count = len(page_classifications)
+
     _log.info(
         "[process] Parse complete for %s: %d pages, type=%s",
         file.filename, page_count, pdf_type.value,
     )
 
+    # ── Build performance metrics ────────────────────────────────────────
+    processing_metrics = ProcessingMetrics(
+        requested_device=runtime["requested_device"],
+        resolved_device=runtime["resolved_device"],
+        gpu_available=bool(runtime["gpu_available"]),
+        gpu_name=runtime["gpu_name"],
+        cuda_version=runtime["cuda_version"],
+        gpu_count=int(runtime["gpu_count"]),
+        upload_seconds=upload_seconds,
+        detection_seconds=detection_seconds,
+        parsing_seconds=parsing_seconds,
+        metadata_seconds=parse_timing.get("metadata_seconds", 0.0),
+        zip_seconds=0.0,
+        total_seconds=0.0,
+        page_count=page_count,
+    )
+    processing_metrics.parsing_pages_per_second, processing_metrics.parsing_pages_per_minute = calculate_throughput(
+        page_count,
+        processing_metrics.parsing_seconds,
+    )
+
     # ── Step 3: Build ZIP in memory ──────────────────────────────────────
+    zip_start = time.perf_counter()
     zip_buffer = BytesIO()
     zip_prefix = pdf_stem  # folder name inside the zip
 
@@ -247,16 +404,32 @@ async def process_pdf(file: UploadFile = File(...)) -> StreamingResponse:
             ],
             "metadata": metadata.model_dump(),
         }
-        metadata_json = json.dumps(metadata_dict, indent=2, ensure_ascii=False)
-        zf.writestr(f"{zip_prefix}/metadata.json", metadata_json)
+        metadata_dict["processing_metrics"] = processing_metrics.model_dump()
+        zf.writestr(f"{zip_prefix}/metadata.json", json.dumps(metadata_dict, indent=2, ensure_ascii=False))
 
         # Add all extracted images
         for img_file in sorted(output_dir.glob("*.png")):
             zf.write(img_file, f"{zip_prefix}/images/{img_file.name}")
 
+    processing_metrics.zip_seconds = time.perf_counter() - zip_start
+    processing_metrics.total_seconds = time.perf_counter() - request_start
+    processing_metrics.overall_pages_per_second, processing_metrics.overall_pages_per_minute = calculate_throughput(
+        page_count,
+        processing_metrics.total_seconds,
+    )
+
+    # ── Add performance.json to ZIP ──────────────────────────────────────
+    performance_payload = _build_performance_payload(processing_metrics, file.filename)
+    zip_buffer.seek(0)
+    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            f"{zip_prefix}/performance.json",
+            json.dumps(performance_payload, indent=2, ensure_ascii=False),
+        )
+
     zip_buffer.seek(0)
     zip_filename = f"{pdf_stem}_parsed.zip"
-
+    _print_processing_summary(file.filename, page_count, pdf_type.value, processing_metrics)
     _log.info("[process] Returning ZIP %s for doc_id=%s", zip_filename, doc_id)
 
     return StreamingResponse(

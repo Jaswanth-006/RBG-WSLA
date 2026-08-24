@@ -6,11 +6,13 @@ into structured Pydantic models.
 """
 
 import logging
+import time
 from io import StringIO
 from pathlib import Path
 
 from docling_core.types.doc import PictureItem, SectionHeaderItem, TableItem, TextItem
 
+from docling.datamodel.accelerator_options import AcceleratorOptions
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
     PdfPipelineOptions,
@@ -30,12 +32,31 @@ from models import (
 _log = logging.getLogger(__name__)
 
 
+def calculate_throughput(page_count: int, elapsed_seconds: float) -> tuple[float, float]:
+    """Return pages/sec and pages/minute with zero-safe handling."""
+    if elapsed_seconds <= 0:
+        return 0.0, 0.0
+    pages_per_second = page_count / elapsed_seconds
+    return pages_per_second, pages_per_second * 60.0
+
+
+def get_runtime_summary(requested_device: str | None = None) -> dict[str, object]:
+    """Return a runtime summary for CPU-only execution."""
+    return {
+        "requested_device": "cpu",
+        "resolved_device": "cpu",
+        "gpu_available": False,
+        "gpu_name": None,
+        "cuda_version": None,
+        "gpu_count": 0,
+    }
+
+
 def _build_converter() -> DocumentConverter:
-    """Create a DocumentConverter configured for full PDF parsing with OCR."""
-    # pipeline_options = PdfPipelineOptions()
-    pipeline_options = PdfPipelineOptions(
-    artifacts_path="/opt/docling/models"
-)
+    """Create a DocumentConverter configured for CPU-only PDF parsing with OCR."""
+    # Force CPU-only execution by explicitly setting device to "cpu"
+    accelerator_options = AcceleratorOptions(device="cpu")
+    pipeline_options = PdfPipelineOptions(accelerator_options=accelerator_options)
     pipeline_options.images_scale = settings.image_resolution_scale
     pipeline_options.generate_page_images = False
     pipeline_options.generate_picture_images = True
@@ -44,6 +65,8 @@ def _build_converter() -> DocumentConverter:
     # Enable OCR for scanned pages — Docling applies OCR only where needed
     pipeline_options.do_ocr = True
     pipeline_options.ocr_options = RapidOcrOptions()
+
+    _log.info("Initializing Docling converter with CPU-only mode (device=cpu)")
 
     return DocumentConverter(
         allowed_formats=[InputFormat.PDF],
@@ -56,28 +79,36 @@ def _build_converter() -> DocumentConverter:
 def parse_pdf(
     pdf_path: Path,
     output_dir: Path,
-) -> tuple[str, str, DocumentMetadata]:
+    *,
+    include_timing: bool = False,
+) -> tuple[str, str, DocumentMetadata] | tuple[str, str, DocumentMetadata, dict[str, float]]:
     """Parse a PDF using Docling and extract all metadata.
 
     Args:
         pdf_path: Path to the uploaded PDF file.
         output_dir: Directory to save the markdown and image outputs.
+        include_timing: If True, return timing information as a fourth element.
 
     Returns:
-        A tuple of (markdown_file_path, markdown_text, metadata).
+        A tuple of (markdown_file_path, markdown_text, metadata) or
+        (markdown_file_path, markdown_text, metadata, timing_info) if include_timing=True.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     converter = _build_converter()
 
     _log.info("Starting Docling conversion for %s", pdf_path.name)
+    conv_start = time.perf_counter()
     conv_result = converter.convert(pdf_path)
-    _log.info("Docling conversion complete for %s", pdf_path.name)
+    conversion_seconds = time.perf_counter() - conv_start
+    _log.info("Docling conversion complete for %s in %.4fs", pdf_path.name, conversion_seconds)
 
     document = conv_result.document
 
     # ── Export full markdown ──────────────────────────────────────────────
+    markdown_start = time.perf_counter()
     markdown_text = document.export_to_markdown()
+    markdown_seconds = time.perf_counter() - markdown_start
 
     # Save markdown with the same stem name as the original PDF
     md_filename = pdf_path.stem + ".md"
@@ -122,6 +153,7 @@ def parse_pdf(
         )
 
     # ── Extract images and paragraphs ────────────────────────────────────
+    metadata_start = time.perf_counter()
     images: list[ImageMetadata] = []
     paragraphs: list[ParagraphMetadata] = []
     sections: list[SectionMetadata] = []
@@ -188,14 +220,24 @@ def parse_pdf(
         paragraphs=paragraphs,
         sections=sections,
     )
+    metadata_seconds = time.perf_counter() - metadata_start
 
     _log.info(
-        "Extracted %d tables, %d images, %d paragraphs, %d sections from %s",
+        "Extracted %d tables, %d images, %d paragraphs, %d sections from %s in %.4fs",
         len(tables),
         len(images),
         len(paragraphs),
         len(sections),
         pdf_path.name,
+        metadata_seconds,
     )
 
+    timing_info = {
+        "markdown_export_seconds": markdown_seconds,
+        "conversion_seconds": conversion_seconds,
+        "metadata_seconds": metadata_seconds,
+    }
+
+    if include_timing:
+        return str(md_path), markdown_text, metadata, timing_info
     return str(md_path), markdown_text, metadata
