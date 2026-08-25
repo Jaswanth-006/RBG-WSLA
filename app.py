@@ -9,15 +9,22 @@ Endpoints:
 
 import json
 import logging
+import os
+import shutil
+import sys
 import time
 import uuid
 import zipfile
 from io import BytesIO
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 from config import settings
+
+# Load environment variables from .env file
+load_dotenv()
 from models import (
     ParseResponse,
     ProcessingMetrics,
@@ -432,6 +439,20 @@ async def process_pdf(file: UploadFile = File(...)) -> StreamingResponse:
     _print_processing_summary(file.filename, page_count, pdf_type.value, processing_metrics)
     _log.info("[process] Returning ZIP %s for doc_id=%s", zip_filename, doc_id)
 
+    # ── Step 4: Cleanup uploaded PDF and outputs ────────────────────────
+    try:
+        # Remove uploaded PDF directory
+        if doc_dir.exists():
+            shutil.rmtree(doc_dir)
+            _log.info("[cleanup] Removed uploaded PDF directory: %s", doc_dir)
+
+        # Remove output directory (markdown and images)
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+            _log.info("[cleanup] Removed output directory: %s", output_dir)
+    except Exception as e:
+        _log.warning("[cleanup] Failed to cleanup files for doc_id=%s: %s", doc_id, e)
+
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
@@ -482,8 +503,37 @@ def document_status(doc_id: str) -> StatusResponse:
 # ─── Health check ────────────────────────────────────────────────────────────
 
 
-@app.get("/health")
+@app.get("/")
 def health_check() -> dict[str, str]:
     """Simple health check endpoint."""
     return {"status": "ok", "service": "WSLA Document Parsing API"}
+
+
+# ─── Application startup ─────────────────────────────────────────────────────
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    # Read PORT from environment variable
+    port = os.getenv("PORT")
+
+    if not port:
+        print("ERROR: PORT environment variable is not set in .env file")
+        sys.exit(1)
+
+    try:
+        port_int = int(port)
+    except ValueError:
+        print(f"ERROR: PORT value '{port}' is not a valid integer")
+        sys.exit(1)
+
+    print(f"Starting WSLA Document Parsing API on port {port_int}")
+
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=port_int,
+        log_level="info",
+    )
 

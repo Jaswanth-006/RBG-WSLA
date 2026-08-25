@@ -142,6 +142,9 @@ ENV PYTHONPATH=/app/wsla_service
 
 WORKDIR /app/wsla_service
 
-EXPOSE 8000
+# Port will be set via environment variable
+ARG PORT=7860
+ENV PORT=${PORT}
+EXPOSE ${PORT}
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "app.py"]
