@@ -1,6 +1,27 @@
-__pycache__/
-output/
-uploads/
-*.zip
+# Environment / secrets
 .env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data
+uploads/
+output/
+wsla_uploads/
+wsla_output/
+
+# Local artifacts
+*.zip
+*.log
 .vscode/
+.idea/
+
+# Git
+.git/

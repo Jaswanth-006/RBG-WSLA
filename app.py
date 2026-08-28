@@ -7,6 +7,7 @@ Endpoints:
     GET  /status/{id}  — Check if a document exists and its parse status
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ from parser_service import (
     parse_pdf,
 )
 from pdf_detector import detect_pdf_type
+from scheduler import CpuAwarePdfScheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +55,12 @@ app = FastAPI(
     ),
     version="1.0.0",
 )
+
+
+# One scheduler for the process. It detects the CPU count visible inside the
+# container and keeps at least two logical CPUs per concurrent PDF when more
+# than two CPUs are available.
+pdf_scheduler = CpuAwarePdfScheduler()
 
 
 def _print_runtime_summary() -> None:
@@ -283,77 +291,47 @@ def parse_document(doc_id: str) -> ParseResponse:
 # ─── Process endpoint (all-in-one: upload → detect → parse → ZIP) ───────────
 
 
-@app.post("/process")
-async def process_pdf(file: UploadFile = File(...)) -> StreamingResponse:
-    """Upload a PDF, detect its type, parse it via Docling, and return a ZIP.
+def _process_saved_pdf(
+    *,
+    doc_id: str,
+    file_path,
+    filename: str,
+    file_size: int,
+    upload_seconds: float,
+    allocated_cores: int,
+) -> tuple[bytes, str]:
+    """Run detection, Docling parsing, ZIP creation, and cleanup for one job.
 
-    This endpoint combines the entire workflow into a single call:
-    1. Accepts a PDF upload.
-    2. Detects whether the PDF is editable, scanned, or mixed.
-    3. Parses through Docling's StandardPdfPipeline (with OCR for scanned pages).
-    4. Packages the parsed markdown, metadata JSON, and extracted images into a
-       ZIP archive and streams it back for download.
-
-    The ZIP contains:
-        {pdf_stem}/
-        ├── {pdf_stem}.md          — Full parsed markdown
-        ├── metadata.json          — Structured metadata (tables, images, paragraphs, sections)
-        ├── performance.json       — Performance metrics and timing
-        └── images/
-            ├── {pdf_stem}-picture-0.png
-            ├── {pdf_stem}-picture-1.png
-            └── ...
+    ``allocated_cores`` is the scheduler's logical CPU budget for this job.
+    The shared Docling converter remains a single instance; Docling itself
+    controls its internal thread pools.
     """
     request_start = time.perf_counter()
+    pdf_path = file_path
+    doc_dir = pdf_path.parent
+    output_dir = settings.output_dir / doc_id
     runtime = get_runtime_summary()
 
-    # ── Validate upload ──────────────────────────────────────────────────
-    if file.filename is None or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF files are accepted. Please upload a .pdf file.",
-        )
-
-    content = await file.read()
-    file_size = len(content)
-
-    if file_size > settings.max_file_size:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                f"File size ({file_size} bytes) exceeds the maximum "
-                f"allowed size ({settings.max_file_size} bytes)."
-            ),
-        )
-
-    if file_size == 0:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-
-    # ── Save the PDF ─────────────────────────────────────────────────────
-    upload_start = time.perf_counter()
-    doc_id = str(uuid.uuid4())
-    doc_dir = settings.upload_dir / doc_id
-    doc_dir.mkdir(parents=True, exist_ok=True)
-
-    pdf_path = doc_dir / file.filename
-    pdf_path.write_bytes(content)
-    upload_seconds = time.perf_counter() - upload_start
-    pdf_stem = pdf_path.stem
-
     _log.info(
-        "[process] Uploaded %s (%d bytes) as doc_id=%s",
-        file.filename, file_size, doc_id,
+        "[process] job=%s allocated_cores=%d starting %s",
+        doc_id,
+        allocated_cores,
+        filename,
     )
 
     # ── Step 1: Detect PDF type ──────────────────────────────────────────
-    _log.info("[process] Detecting PDF type for %s", file.filename)
+    _log.info("[process] Detecting PDF type for %s", filename)
     detect_start = time.perf_counter()
     pdf_type, page_classifications = detect_pdf_type(pdf_path)
     detection_seconds = time.perf_counter() - detect_start
 
-    # ── Step 2: Parse via Docling ────────────────────────────────────────
-    output_dir = settings.output_dir / doc_id
-    _log.info("[process] Parsing %s (type=%s) via Docling", file.filename, pdf_type.value)
+    # ── Step 2: Parse via shared Docling converter ───────────────────────
+    _log.info(
+        "[process] Parsing %s (type=%s, allocated_cores=%d) via Docling",
+        filename,
+        pdf_type.value,
+        allocated_cores,
+    )
     parse_start = time.perf_counter()
     markdown_file, markdown_text, metadata, parse_timing = parse_pdf(
         pdf_path,
@@ -365,7 +343,9 @@ async def process_pdf(file: UploadFile = File(...)) -> StreamingResponse:
 
     _log.info(
         "[process] Parse complete for %s: %d pages, type=%s",
-        file.filename, page_count, pdf_type.value,
+        filename,
+        page_count,
+        pdf_type.value,
     )
 
     # ── Build performance metrics ────────────────────────────────────────
@@ -392,18 +372,16 @@ async def process_pdf(file: UploadFile = File(...)) -> StreamingResponse:
     # ── Step 3: Build ZIP in memory ──────────────────────────────────────
     zip_start = time.perf_counter()
     zip_buffer = BytesIO()
-    zip_prefix = pdf_stem  # folder name inside the zip
+    zip_prefix = pdf_path.stem
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Add the markdown file
-        md_path = output_dir / f"{pdf_stem}.md"
+        md_path = output_dir / f"{pdf_path.stem}.md"
         if md_path.exists():
-            zf.write(md_path, f"{zip_prefix}/{pdf_stem}.md")
+            zf.write(md_path, f"{zip_prefix}/{pdf_path.stem}.md")
 
-        # Build and add metadata JSON
         metadata_dict = {
             "doc_id": doc_id,
-            "filename": file.filename,
+            "filename": filename,
             "pdf_type": pdf_type.value,
             "page_count": page_count,
             "page_classifications": [
@@ -412,9 +390,11 @@ async def process_pdf(file: UploadFile = File(...)) -> StreamingResponse:
             "metadata": metadata.model_dump(),
         }
         metadata_dict["processing_metrics"] = processing_metrics.model_dump()
-        zf.writestr(f"{zip_prefix}/metadata.json", json.dumps(metadata_dict, indent=2, ensure_ascii=False))
+        zf.writestr(
+            f"{zip_prefix}/metadata.json",
+            json.dumps(metadata_dict, indent=2, ensure_ascii=False),
+        )
 
-        # Add all extracted images
         for img_file in sorted(output_dir.glob("*.png")):
             zf.write(img_file, f"{zip_prefix}/images/{img_file.name}")
 
@@ -425,8 +405,7 @@ async def process_pdf(file: UploadFile = File(...)) -> StreamingResponse:
         processing_metrics.total_seconds,
     )
 
-    # ── Add performance.json to ZIP ──────────────────────────────────────
-    performance_payload = _build_performance_payload(processing_metrics, file.filename)
+    performance_payload = _build_performance_payload(processing_metrics, filename)
     zip_buffer.seek(0)
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(
@@ -435,31 +414,142 @@ async def process_pdf(file: UploadFile = File(...)) -> StreamingResponse:
         )
 
     zip_buffer.seek(0)
-    zip_filename = f"{pdf_stem}_parsed.zip"
-    _print_processing_summary(file.filename, page_count, pdf_type.value, processing_metrics)
-    _log.info("[process] Returning ZIP %s for doc_id=%s", zip_filename, doc_id)
+    zip_bytes = zip_buffer.getvalue()
+    zip_filename = f"{pdf_path.stem}_parsed.zip"
 
-    # ── Step 4: Cleanup uploaded PDF and outputs ────────────────────────
+    _print_processing_summary(
+        filename,
+        page_count,
+        pdf_type.value,
+        processing_metrics,
+    )
+
+    # ── Step 4: Cleanup ──────────────────────────────────────────────────
     try:
-        # Remove uploaded PDF directory
         if doc_dir.exists():
             shutil.rmtree(doc_dir)
             _log.info("[cleanup] Removed uploaded PDF directory: %s", doc_dir)
 
-        # Remove output directory (markdown and images)
         if output_dir.exists():
             shutil.rmtree(output_dir)
             _log.info("[cleanup] Removed output directory: %s", output_dir)
-    except Exception as e:
-        _log.warning("[cleanup] Failed to cleanup files for doc_id=%s: %s", doc_id, e)
+    except Exception as exc:
+        _log.warning(
+            "[cleanup] Failed to cleanup files for doc_id=%s: %s",
+            doc_id,
+            exc,
+        )
+
+    _log.info(
+        "[process] Returning ZIP %s for doc_id=%s allocated_cores=%d",
+        zip_filename,
+        doc_id,
+        allocated_cores,
+    )
+    return zip_bytes, zip_filename
+
+
+@app.post("/process")
+async def process_pdf(file: UploadFile = File(...)) -> StreamingResponse:
+    """Upload a PDF, queue it, process it, and return the ZIP.
+
+    Requests are placed into the CPU-aware scheduler. The HTTP request waits
+    for its own job while other PDFs may be processed concurrently.
+    """
+    if file.filename is None or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF files are accepted. Please upload a .pdf file.",
+        )
+
+    content = await file.read()
+    file_size = len(content)
+
+    if file_size > settings.max_file_size:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"File size ({file_size} bytes) exceeds the maximum "
+                f"allowed size ({settings.max_file_size} bytes)."
+            ),
+        )
+
+    if file_size == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    upload_start = time.perf_counter()
+    doc_id = str(uuid.uuid4())
+    doc_dir = settings.upload_dir / doc_id
+    doc_dir.mkdir(parents=True, exist_ok=True)
+
+    pdf_path = doc_dir / file.filename
+    pdf_path.write_bytes(content)
+    upload_seconds = time.perf_counter() - upload_start
+
+    _log.info(
+        "[process] Uploaded %s (%d bytes) as doc_id=%s",
+        file.filename,
+        file_size,
+        doc_id,
+    )
+
+    job_id, future = pdf_scheduler.submit(
+        lambda allocated_cores: _process_saved_pdf(
+            doc_id=doc_id,
+            file_path=pdf_path,
+            filename=file.filename,
+            file_size=file_size,
+            upload_seconds=upload_seconds,
+            allocated_cores=allocated_cores,
+        )
+    )
+
+    _log.info(
+        "[process] Queued doc_id=%s job_id=%s scheduler=%s",
+        doc_id,
+        job_id,
+        pdf_scheduler.snapshot(),
+    )
+
+    try:
+        zip_bytes, zip_filename = await asyncio.wrap_future(future)
+    except Exception as exc:
+        # The worker normally performs cleanup on successful processing. If
+        # an unexpected exception occurs before that, clean up this request's
+        # temporary files here.
+        try:
+            if doc_dir.exists():
+                shutil.rmtree(doc_dir)
+            output_dir = settings.output_dir / doc_id
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+        except Exception:
+            _log.warning(
+                "[cleanup] Failed after job error for doc_id=%s",
+                doc_id,
+                exc_info=True,
+            )
+
+        _log.exception("[process] Job failed doc_id=%s job_id=%s", doc_id, job_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF processing failed: {exc}",
+        ) from exc
 
     return StreamingResponse(
-        zip_buffer,
+        BytesIO(zip_bytes),
         media_type="application/zip",
         headers={
             "Content-Disposition": f'attachment; filename="{zip_filename}"',
+            "X-WSLA-Job-ID": job_id,
         },
     )
+
+
+@app.get("/scheduler")
+def scheduler_status() -> dict[str, object]:
+    """Return the current CPU scheduler state."""
+    return pdf_scheduler.snapshot()
 
 
 # ─── Status endpoint ─────────────────────────────────────────────────────────
@@ -507,6 +597,12 @@ def document_status(doc_id: str) -> StatusResponse:
 def health_check() -> dict[str, str]:
     """Simple health check endpoint."""
     return {"status": "ok", "service": "WSLA Document Parsing API"}
+
+
+@app.on_event("shutdown")
+def _shutdown_scheduler() -> None:
+    """Cleanly stop scheduler workers during container shutdown."""
+    pdf_scheduler.shutdown()
 
 
 # ─── Application startup ─────────────────────────────────────────────────────
