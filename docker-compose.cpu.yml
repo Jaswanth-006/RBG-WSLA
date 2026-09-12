@@ -1,0 +1,10 @@
+# CPU-only override - use on hosts without an NVIDIA GPU:
+#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml up
+services:
+  wsla-api:
+    environment:
+      - WSLA_DEVICE=cpu
+    deploy:
+      resources:
+        reservations:
+          devices: []
