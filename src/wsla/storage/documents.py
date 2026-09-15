@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from config import settings
+from wsla.config import settings
 
 _log = logging.getLogger(__name__)
 _lock = threading.Lock()

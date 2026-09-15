@@ -1,4 +1,4 @@
-"""PaddleOCR fallback: re-read pages Docling got wrong or got nothing from.
+"""Stage 4 — recover: re-read pages Docling got wrong or got nothing from.
 
 Docling (with EasyOCR) remains the primary engine. A page is handed to PaddleOCR
 when either signal fires:
@@ -6,8 +6,8 @@ when either signal fires:
 * **low yield** — Docling produced almost no text for the page, or it failed
   outright, in which case every page qualifies;
 * **poor quality** — the page is full of text, but the text reads as garbled
-  Spanish. See ``text_quality``. Such a page is *replaced* rather than added to,
-  because what Docling produced is wrong rather than missing.
+  Spanish. See ``wsla.pipeline.quality``. Such a page is *replaced* rather than
+  added to, because what Docling produced is wrong rather than missing.
 
 The engine is loaded lazily, once per process, and inference is serialised
 behind a lock. When ``paddleocr`` is not installed the service keeps working and
@@ -25,9 +25,9 @@ from pathlib import Path
 import numpy as np
 import pypdfium2 as pdfium
 
-from config import settings
-from models import FallbackReport, PageOcrResult
-from text_quality import count_alnum, is_garbled, quality_score
+from wsla.config import settings
+from wsla.pipeline.quality import count_alnum, is_garbled, quality_score
+from wsla.schemas import FallbackReport, PageOcrResult
 
 _log = logging.getLogger(__name__)
 

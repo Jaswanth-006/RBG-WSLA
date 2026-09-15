@@ -13,14 +13,13 @@ pandas>=2.1.4
 tabulate>=0.9.0
 python-dotenv>=1.0.0
 
-# PaddleOCR fallback engine (see ocr_fallback.py).
+# PaddleOCR fallback engine (see src/wsla/pipeline/recover.py).
 # The PaddlePaddle framework is not a declared dependency of paddleocr and is
 # installed separately (the PyPI wheel is the CPU build) — see the Dockerfile:
 #   pip install paddlepaddle==3.2.0
 paddleocr==3.7.0
 
-# CPU-only PyTorch (required by docling for CPU inference)
-# Install CPU version to avoid CUDA dependencies and reduce image size
-# --index-url https://download.pytorch.org/whl/cpu
-# torch>=2.0.0
-# torchvision>=0.15.0
+# PyTorch is not listed here: the Dockerfile installs the CUDA build
+# (torch 2.14.0 from the cu126 index) before Docling, so Docling and EasyOCR
+# run on the GPU. For a CPU-only local setup, install torch from
+# https://download.pytorch.org/whl/cpu instead.
