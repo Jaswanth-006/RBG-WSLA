@@ -15,6 +15,18 @@ services:
       - WSLA_UPLOAD_DIR=/app/wsla_uploads
       - WSLA_OUTPUT_DIR=/app/wsla_output
       - OMP_NUM_THREADS=4
+      # auto = GPU when visible, else CPU. Set to cpu to force CPU.
+      - WSLA_DEVICE=auto
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    # Hand the container every NVIDIA GPU the host exposes.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     restart: unless-stopped
 
 volumes:

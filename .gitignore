@@ -4,3 +4,6 @@ uploads/
 *.zip
 .env
 .vscode/
+
+# Client documents - never commit these
+*.pdf
