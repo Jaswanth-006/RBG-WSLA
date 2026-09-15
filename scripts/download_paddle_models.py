@@ -4,10 +4,11 @@ Run at image build time so the service never downloads models at runtime.
 Models land in PaddleX's cache, ``$PADDLE_PDX_CACHE_HOME/official_models``.
 
 Usage:
-    PADDLE_PDX_CACHE_HOME=/opt/paddle python download_paddle_models.py
+    PADDLE_PDX_CACHE_HOME=/opt/paddle python scripts/download_paddle_models.py
 
-Model names default to the values in config.py and honour the same
-``WSLA_PADDLE_*`` environment variables.
+Model names default to the values in src/wsla/config.py and honour the same
+``WSLA_PADDLE_*`` environment variables. This script deliberately does not import
+the ``wsla`` package: the builder stage has PaddleOCR but not the application.
 """
 
 import os

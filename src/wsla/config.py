@@ -5,18 +5,20 @@ from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
-# Resolve the wsla_service package directory so data directories live inside it
-_PACKAGE_DIR = Path(__file__).resolve().parent
+# The repository root (src/wsla/config.py -> parents[2]). The default data folders
+# are anchored here rather than beside this file, so they stay at the top of the
+# repo instead of ending up inside the package. Docker overrides both.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Directory where uploaded PDFs are stored, keyed by doc_id
-    upload_dir: Path = _PACKAGE_DIR / "uploads"
+    upload_dir: Path = _REPO_ROOT / "uploads"
 
     # Directory where parsed outputs (markdown, images) are stored
-    output_dir: Path = _PACKAGE_DIR / "output"
+    output_dir: Path = _REPO_ROOT / "output"
 
     # Maximum file size in bytes (default 100 MB)
     max_file_size: int = 100 * 1024 * 1024
@@ -44,8 +46,8 @@ class Settings(BaseSettings):
 
     # Quality trigger: a page can be full of text and still be wrong (a garbled
     # OCR layer). Pages whose Spanish reads as accent-starved are re-OCR'd even
-    # though they pass the character count. See text_quality.py for the measured
-    # thresholds. Raise the rate to send more pages to PaddleOCR.
+    # though they pass the character count. See pipeline/quality.py for the
+    # measured thresholds. Raise the rate to send more pages to PaddleOCR.
     enable_quality_trigger: bool = True
     fallback_min_accent_rate: float = 0.008
     quality_min_letters: int = 60
@@ -90,4 +92,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-

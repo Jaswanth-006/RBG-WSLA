@@ -1,0 +1,4 @@
+# Test dependencies. The tests cover the pipeline logic and need only the light
+# runtime packages (pydantic-settings, numpy, pypdfium2) - not Docling, PyTorch
+# or PaddleOCR.
+pytest>=8.0

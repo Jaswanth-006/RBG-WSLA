@@ -1,4 +1,4 @@
-"""Text-quality signals for spotting OCR output that is present but wrong.
+"""Stage 4 — quality: spot OCR output that is present but wrong.
 
 A page can be full of characters and still be unusable. `WLA_Mensajeria
 Corporativa_Final.pdf` is a 2009 scan carrying a garbled OCR layer — "Marfa" for
