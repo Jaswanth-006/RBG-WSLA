@@ -1,4 +1,4 @@
-"""Pydantic request/response schemas for the WSLA API."""
+"""Pydantic models shared by the pipeline stages and the API."""
 
 from enum import Enum
 
@@ -133,7 +133,7 @@ class FallbackReport(BaseModel):
     enabled: bool = False
     available: bool = False
     triggered: bool = False
-    reason: str | None = None  # "low_yield" or "docling_error"
+    reason: str | None = None  # "low_yield", "poor_quality" or "docling_error"
     skipped_reason: str | None = None
     docling_error: str | None = None
     threshold: int = 0

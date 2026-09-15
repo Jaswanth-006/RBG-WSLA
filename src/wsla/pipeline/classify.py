@@ -1,17 +1,20 @@
-"""Rule-based PDF type detection: editable, scanned, or mixed.
+"""Stage 2 — classify: is this PDF digital, scanned, or a mix?
 
-Uses pypdfium2 (already a docling dependency) to extract text from each page
-and classify based on character count thresholds.
+Rule-based detection using pypdfium2 (already a Docling dependency): count the
+text characters each page already carries and classify by threshold. No
+rendering and no models, so this takes milliseconds.
+
+The result is reported to the caller and supplies the page count to stage 4. It
+does not route anything — Docling decides per region whether OCR is needed.
 """
 
 import logging
-from io import BytesIO
 from pathlib import Path
 
 import pypdfium2 as pdfium
 
-from config import settings
-from models import PageClassification, PdfType
+from wsla.config import settings
+from wsla.schemas import PageClassification, PdfType
 
 _log = logging.getLogger(__name__)
 

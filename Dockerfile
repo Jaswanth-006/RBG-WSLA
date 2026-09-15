@@ -53,8 +53,8 @@ RUN mkdir -p /opt/docling/models
 #
 # RapidOCR is deliberately NOT prefetched: its checkpoints are served from
 # ModelScope, which is unreachable from our network, and they default to
-# Chinese. OCR is handled by PaddleOCR instead (see ocr_fallback.py), whose
-# Latin models are fetched from Hugging Face further down.
+# Chinese. Docling OCRs with EasyOCR instead (below), and PaddleOCR is the
+# fallback (src/wsla/pipeline/recover.py).
 RUN docling-tools models download \
     --output-dir /opt/docling/models \
     layout \
@@ -85,7 +85,7 @@ ENV PADDLE_PDX_CACHE_HOME=/opt/paddle
 RUN pip install --no-cache-dir paddlepaddle==3.2.0 \
     && pip install --no-cache-dir "paddleocr==3.7.0"
 
-COPY download_paddle_models.py /tmp/download_paddle_models.py
+COPY scripts/download_paddle_models.py /tmp/download_paddle_models.py
 
 RUN python /tmp/download_paddle_models.py
 
@@ -118,20 +118,18 @@ RUN apt-get update \
 #     --extra-index-url https://download.pytorch.org/whl/cpu
 
 # NEW:
-# Runtime does NOT need the Docling CLI because models were already
-# downloaded in the builder stage.
+# Runtime does NOT need to download models - the builder stage already did.
 #
 # It DOES need:
 #   format-pdf
+#   convert-core (scipy, numpy, pillow and rtree for the PDF/OCR pipeline)
 #   models-local
-#   RapidOCR + ONNX Runtime
+#   EasyOCR, Docling's OCR engine
 # OLD - keep for reference:
 # RUN pip install --no-cache-dir \
 #     "docling-slim[format-pdf,models-local,feat-ocr-rapidocr-onnx,cli]" \
 #     --extra-index-url https://download.pytorch.org/whl/cpu
 
-# NEW - convert-core supplies scipy, numpy, pillow and rtree,
-# which are required by the local Docling PDF/OCR pipeline.
 # GPU PyTorch FIRST, so Docling and EasyOCR bind to the CUDA build.
 # These wheels bundle the CUDA runtime; the driver comes from the host via
 # `--gpus all`, so no CUDA base image is needed. cu126 matches torch 2.14.
@@ -154,10 +152,7 @@ RUN pip install --no-cache-dir \
     -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
-# EasyOCR runtime (Docling's OCR engine). Its models arrive from the
-# builder stage inside /opt/docling/models.
-
-# Copy ONLY the pre-downloaded Docling models
+# Copy ONLY the pre-downloaded Docling models (including EasyOCR's)
 # from the builder stage.
 COPY --from=model-builder \
     /opt/docling/models \
@@ -181,10 +176,10 @@ ENV OMP_NUM_THREADS=4
 # auto = use the GPU when one is visible, else CPU
 ENV WSLA_DEVICE=auto
 
-# Application
+# Application: only the package is needed at runtime.
 WORKDIR /app
 
-COPY . /app/wsla_service/
+COPY src/ /app/src/
 
 # Runtime directories
 RUN mkdir -p \
@@ -193,13 +188,11 @@ RUN mkdir -p \
 
 ENV WSLA_UPLOAD_DIR=/app/wsla_uploads
 ENV WSLA_OUTPUT_DIR=/app/wsla_output
-ENV PYTHONPATH=/app/wsla_service
-
-WORKDIR /app/wsla_service
+ENV PYTHONPATH=/app/src
 
 # Port will be set via environment variable
 ARG PORT=7860
 ENV PORT=${PORT}
 EXPOSE ${PORT}
 
-CMD ["python", "app.py"]
+CMD ["python", "-m", "wsla.main"]

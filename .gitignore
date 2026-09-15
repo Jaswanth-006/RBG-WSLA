@@ -7,3 +7,4 @@ uploads/
 
 # Client documents - never commit these
 *.pdf
+.pytest_cache/
