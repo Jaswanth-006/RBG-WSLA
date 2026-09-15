@@ -11,9 +11,9 @@ flowchart TD
     STORE -->|GET /parse/doc_id| DETECT
     CLIENT -->|POST /process| DETECT
 
-    DETECT["<b>1. Detect type</b><br/>pdf_detector.py<br/>pypdfium2 counts chars per page<br/>→ editable / scanned / mixed"]
+    DETECT["<b>1. Detect type</b><br/>pipeline/classify.py<br/>pypdfium2 counts chars per page<br/>→ editable / scanned / mixed"]
 
-    DETECT --> DOCLING["<b>2. Docling</b> (GPU when available)<br/>parser_service.py<br/>layout + TableFormer + EasyOCR (es)<br/>→ markdown, tables, images, sections"]
+    DETECT --> DOCLING["<b>2. Docling</b> (GPU when available)<br/>pipeline/extract.py<br/>layout + TableFormer + EasyOCR (es)<br/>→ markdown, tables, images, sections"]
 
     DOCLING --> YIELD{"<b>3. Per-page check</b><br/>too little text,<br/>or garbled Spanish?"}
     DOCLING -.->|conversion raises| PADDLE
@@ -21,7 +21,7 @@ flowchart TD
     YIELD -->|no — Docling read it| KEEP["Keep Docling output"]
     YIELD -->|yes — unreadable or garbled| PADDLE
 
-    PADDLE["<b>4. PaddleOCR</b> (CPU)<br/>ocr_fallback.py<br/>render page at 200 DPI →<br/>PP-OCRv5 det + Latin rec →<br/>reading order → text blocks"]
+    PADDLE["<b>4. PaddleOCR</b> (CPU)<br/>pipeline/recover.py<br/>render page at 200 DPI →<br/>PP-OCRv5 det + Latin rec →<br/>reading order → text blocks"]
 
     KEEP --> MERGE
     PADDLE --> MERGE["<b>5. Merge</b><br/>OCR blocks inserted at their page<br/>position; markdown gets appended<br/>'Page N (OCR fallback)' sections"]
@@ -31,15 +31,52 @@ flowchart TD
     OUT -->|/process| ZIP([ZIP download])
 ```
 
-| Stage | File | What it does |
+| Stage | Module | What it does |
 | --- | --- | --- |
-| Detect | `pdf_detector.py` | Counts text characters per page with pypdfium2; classifies the document `editable`, `scanned` or `mixed` |
-| Parse | `parser_service.py` | Runs Docling, extracts tables/images/paragraphs/sections, orchestrates the fallback |
-| Fallback | `ocr_fallback.py` | Renders unreadable pages and re-reads them with PaddleOCR |
-| Schemas | `models.py` | Pydantic request/response models, including the fallback report |
-| Settings | `config.py` | All tunables, via `WSLA_`-prefixed environment variables |
-| API | `app.py` | The endpoints |
-| Build | `download_paddle_models.py` | Warms the PaddleOCR models at image build time |
+| 1. Intake | `api/routes.py`, `storage/documents.py` | Accepts and validates the PDF, assigns a `doc_id`, records it |
+| 2. Classify | `pipeline/classify.py` | Counts text characters per page with pypdfium2; classifies the document `editable`, `scanned` or `mixed` |
+| 3. Extract | `pipeline/extract.py` | Runs Docling (layout, TableFormer, EasyOCR) and flattens the result into metadata |
+| 4. Verify & recover | `pipeline/quality.py`, `pipeline/recover.py` | Flags pages with too little or garbled text and re-reads them with PaddleOCR |
+| 5. Assemble | `pipeline/assemble.py` | Folds rescued text back in page order and writes the Markdown |
+| | `pipeline/orchestrator.py` | Runs stages 3–5 for one PDF |
+
+## Project structure
+
+```
+RBG-WSLA/
+├── src/wsla/
+│   ├── main.py                 app setup, startup, entry point (python -m wsla.main)
+│   ├── config.py               every WSLA_ setting
+│   ├── schemas.py              Pydantic models shared by the pipeline and the API
+│   ├── api/
+│   │   ├── routes.py           /upload  /parse  /process  /status  /
+│   │   └── reporting.py        performance.json and the terminal summary
+│   ├── pipeline/               one module per stage
+│   │   ├── orchestrator.py     parse_pdf(): runs stages 3 → 5
+│   │   ├── classify.py         stage 2  editable / scanned / mixed
+│   │   ├── extract.py          stage 3  Docling + metadata
+│   │   ├── quality.py          stage 4  garbled-text signals
+│   │   ├── recover.py          stage 4  PaddleOCR fallback
+│   │   └── assemble.py         stage 5  merge + markdown
+│   ├── storage/
+│   │   └── documents.py        SQLite document store
+│   └── runtime/
+│       ├── device.py           GPU / CPU selection
+│       └── metrics.py          throughput helpers
+├── scripts/
+│   └── download_paddle_models.py   warms the PaddleOCR models at build time
+├── tests/                      pytest suite for the pipeline logic
+├── Dockerfile
+├── docker-compose.yml          GPU
+├── docker-compose.cpu.yml      CPU override
+├── requirements.txt
+├── requirements-dev.txt        test dependencies
+├── pyproject.toml              pytest configuration
+└── .env.example
+```
+
+Dependencies point one way: `api` → `pipeline` → `schemas`/`config`. No
+pipeline stage imports from the API layer.
 
 ---
 
@@ -53,7 +90,7 @@ Six steps, from uploaded PDF to returned Markdown.
 an id the caller can refer to later.
 
 **How:**
-- `app.py` → `upload_pdf()` checks the filename ends in `.pdf`, rejects empty
+- `api/routes.py` → `upload_pdf()` checks the filename ends in `.pdf`, rejects empty
   files, and rejects anything over `WSLA_MAX_FILE_SIZE` (100 MB)
 - generates a `uuid4()` as the `doc_id`
 - writes the bytes to `uploads/{doc_id}/{original_name}.pdf`
@@ -67,7 +104,7 @@ With `/process` the same thing happens internally, and the id is never returned.
 whether any OCR is needed at all.
 
 **How:**
-- `pdf_detector.py` → `detect_pdf_type()` opens the file with `pypdfium2`
+- `pipeline/classify.py` → `detect_pdf_type()` opens the file with `pypdfium2`
 - for each page it calls `text_page.count_chars()` — just counting the text
   already embedded in the file, with no rendering and no models (~15 ms for 14 pages)
 - a page with 50+ characters is `editable`, below that it is `scanned`
@@ -84,10 +121,10 @@ pipeline, because Docling decides region by region what needs OCR.
 tables, figures — reading scanned pages with OCR where there is no text.
 
 **How:**
-- `parser_service.py` → `_build_converter()` configures Docling:
+- `pipeline/extract.py` → `build_converter()` configures Docling:
   device from `WSLA_DEVICE` (`cuda` or `cpu`), `do_ocr=True`,
   `EasyOcrOptions(lang=["es"])` for Spanish, pictures exported at 144 DPI
-- `parse_pdf()` calls `converter.convert(pdf_path)`
+- `pipeline/orchestrator.py` → `parse_pdf()` calls `converter.convert(pdf_path)`
 - inside Docling: each page is rendered → the **layout model** marks regions
   (heading, paragraph, figure, table) → **EasyOCR** reads any region with no
   embedded text → **TableFormer** works out the rows and columns of table regions
@@ -105,7 +142,7 @@ carry the document. If that is not possible, the original error is re-raised.*
 **What we do:** convert Docling's document into flat lists our API can return and
 other systems can consume.
 
-**How:** `_extract_metadata()` makes two passes:
+**How:** `pipeline/extract.py` → `extract_metadata()` makes two passes:
 - **tables** — each one exported three ways (CSV, HTML, Markdown) through a pandas
   dataframe, with its row/column counts
 - **everything else** — `document.iterate_items()` walks the body in reading order:
@@ -123,7 +160,7 @@ what make step 5 possible.
 with a different OCR engine.
 
 **How:**
-- `_page_text()` gathers, per page, the text Docling produced across paragraphs,
+- `extract.page_text()` gathers, per page, the text Docling produced across paragraphs,
   sections and tables
 - a page is **weak** on either of two signals:
   - **too little text** — fewer alphanumeric characters than
@@ -131,10 +168,10 @@ with a different OCR engine.
     excluded, so an empty table skeleton cannot look like text.
   - **garbled text** — the page is full of characters, but its accented-character
     rate is below `WSLA_FALLBACK_MIN_ACCENT_RATE` (0.8%), which is how a bad
-    embedded OCR layer gives itself away (`text_quality.py`)
+    embedded OCR layer gives itself away (`pipeline/quality.py`)
 - every page is weak if Docling failed in step 3
 - no weak pages means PaddleOCR is never even loaded, so this costs nothing
-- for each weak page, `ocr_fallback.run_fallback()`:
+- for each weak page, `pipeline/recover.py` → `run_fallback()`:
   1. **renders** the page at 200 DPI (`WSLA_FALLBACK_DPI`) with `pypdfium2`
   2. **reads** it with PP-OCRv5 detection + the Latin recogniser, dropping lines
      under 0.5 confidence
@@ -155,7 +192,7 @@ rescue is never invisible.
 **What we do:** merge the rescued text into the document and return the result.
 
 **How:**
-- `_merge_recovered_text()` inserts each recovered block into the paragraph list
+- `pipeline/assemble.py` → `merge_recovered_text()` inserts each recovered block into the paragraph list
   **at its own page's position** (labelled `ocr_fallback`) and re-indexes the
   list, so paragraphs stay in page order
 - the same text is appended to the Markdown as `## Page N (OCR fallback)`
@@ -163,7 +200,7 @@ rescue is never invisible.
   is not reliable; Docling's own text is never overwritten
 - the run is labelled: `docling` (no rescue needed), `docling+paddleocr`
   (some pages rescued), or `paddleocr` (Docling failed entirely)
-- the Markdown file is written, and `app.py` assembles the response
+- the Markdown file is written, and `api/routes.py` assembles the response
 
 **Result:** JSON for `/parse`, or a ZIP for `/process` containing the Markdown,
 `metadata.json`, `performance.json` and the images. Every stage is timed, and the
@@ -216,7 +253,7 @@ The `/process` ZIP contains:
    Spanish: its accented-character rate is below
    `WSLA_FALLBACK_MIN_ACCENT_RATE` (0.8%). This catches scans carrying a bad
    embedded OCR layer, which a character count can never detect. See
-   `text_quality.py` for the measured thresholds.
+   `pipeline/quality.py` for the measured thresholds.
 3. **Docling failure** — `convert()` raised. Every page is then handed to
    PaddleOCR and `parse_engine` becomes `paddleocr`. If the fallback cannot run,
    the original Docling error is re-raised.
@@ -346,7 +383,18 @@ curl -s "http://localhost:7860/parse/$DOC" | jq '.parse_engine, .fallback'
 pip install "docling[standard]" "docling-slim[feat-ocr-easyocr]"
 pip install paddlepaddle==3.2.0          # CPU build from PyPI
 pip install -r requirements.txt
-PORT=7860 python app.py
+PORT=7860 PYTHONPATH=src python -m wsla.main
+```
+
+### Tests
+
+The suite covers the pipeline logic — quality signals, weak-page selection,
+column ordering, merging and the document store. It needs only the light
+runtime packages, not Docling, PyTorch or PaddleOCR.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
 ```
 
 ---
@@ -361,7 +409,7 @@ stage copies them in, so **the container never downloads models at start-up**:
   `/opt/docling/models/EasyOcr`, prefetched with
   `docling-tools models download easyocr --easyocr-lang es`
 - **PaddleOCR** — PP-OCRv5 detection, Latin recognition, text-line orientation →
-  `/opt/paddle/official_models`, warmed by `download_paddle_models.py`
+  `/opt/paddle/official_models`, warmed by `scripts/download_paddle_models.py`
 
 All come from HuggingFace / GitHub. When `DOCLING_ARTIFACTS_PATH` is set and
 `model_storage_directory` is left unset, Docling points EasyOCR at the baked-in
@@ -481,5 +529,5 @@ These are the ones that remain, and why.
 | `/parse` re-parsed on every call | Result cached to `parse_result.json`; `?refresh=true` forces a re-parse |
 | `/status` re-read the PDF to report its type | Served from the SQLite document store |
 | `metadata.json` reported `total: 0.0` | JSON reports are written after the totals are computed |
-| State was filesystem-only | `storage.py` keeps a SQLite record of every document |
+| State was filesystem-only | `storage/documents.py` keeps a SQLite record of every document |
 | Tables on scanned pages were empty | Docling does the OCR, so TableFormer gets text cells |
